@@ -1,0 +1,61 @@
+name: Build freetube (x86_64-musl)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or ref containing srcpkgs/freetube"
+        required: false
+        default: "freetube-0.26.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout void-packages
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref_name }}
+          fetch-depth: 1
+
+      - name: Lint template on Ubuntu host
+        run: |
+          if command -v xlint >/dev/null 2>&1; then
+            xlint srcpkgs/freetube/template
+          else
+            echo "xlint not preinstalled; checking basic shell syntax"
+            sh -n srcpkgs/freetube/template
+          fi
+
+      - name: Build freetube inside void-buildroot-musl
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            -w /repo \
+            ghcr.io/void-linux/void-buildroot-musl:latest \
+            sh -ec '
+              export PATH="/usr/libexec/chroot-git:$PATH"
+              git config --global --add safe.directory /repo
+              xbps-install -Suy xbps || true
+              xbps-install -Sy xtools || true
+              mkdir -p etc
+              cat > etc/conf <<EOF
+              XBPS_CHROOT_CMD=ethereal
+              XBPS_ALLOW_CHROOT_BREAKOUT=yes
+              EOF
+              ln -sfn / masterdir
+              if grep -q "REPLACE_WITH_SHA256" srcpkgs/freetube/template; then
+                echo "ERROR: Replace the checksum placeholder in srcpkgs/freetube/template first."
+                echo "Computed checksum for v0.26.0-beta.tar.gz:"
+                curl -sL https://github.com/FreeTubeApp/FreeTube/archive/v0.26.0-beta.tar.gz | sha256sum
+                exit 1
+              fi
+              ./xbps-src -j"$(nproc)" pkg freetube
+            '
+
+      - name: Upload xbps artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetube-x86_64-musl
+          path: hostdir/binpkgs/**/freetube-*.xbps
+          if-no-files-found: error
