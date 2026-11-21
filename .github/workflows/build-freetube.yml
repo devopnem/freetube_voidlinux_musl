@@ -4,52 +4,52 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Branch or ref containing srcpkgs/freetube"
+        description: "Branch or ref of this repo containing srcpkgs/freetube"
         required: false
-        default: "freetube-0.26.0"
+        default: "main"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout void-packages
+      - name: Checkout package repo
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref_name }}
           fetch-depth: 1
 
-      - name: Lint template on Ubuntu host
+      - name: Check checksum placeholder
         run: |
-          if command -v xlint >/dev/null 2>&1; then
-            xlint srcpkgs/freetube/template
-          else
-            echo "xlint not preinstalled; checking basic shell syntax"
-            sh -n srcpkgs/freetube/template
+          if grep -q "REPLACE_WITH_SHA256" srcpkgs/freetube/template; then
+            echo "::error title=Missing checksum::Set checksum= in srcpkgs/freetube/template first."
+            echo "sha256 of v0.26.0-beta.tar.gz:"
+            curl -sL https://github.com/FreeTubeApp/FreeTube/archive/v0.26.0-beta.tar.gz | sha256sum
+            exit 1
           fi
 
       - name: Build freetube inside void-buildroot-musl
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}:/repo" \
-            -w /repo \
+            -v "$PWD:/host" \
             ghcr.io/void-linux/void-buildroot-musl:latest \
             sh -ec '
+              # The buildroot image *is* the xbps-src masterdir: IN_CHROOT makes
+              # xbps-src use / as masterdir, /void-packages as distdir and /host
+              # as hostdir, so the built .xbps ends up in <workspace>/binpkgs.
+              export IN_CHROOT=1
               export PATH="/usr/libexec/chroot-git:$PATH"
-              git config --global --add safe.directory /repo
-              xbps-install -Suy xbps || true
-              xbps-install -Sy xtools || true
-              mkdir -p etc
-              cat > etc/conf <<EOF
-              XBPS_CHROOT_CMD=ethereal
-              XBPS_ALLOW_CHROOT_BREAKOUT=yes
-              EOF
-              ln -sfn / masterdir
-              if grep -q "REPLACE_WITH_SHA256" srcpkgs/freetube/template; then
-                echo "ERROR: Replace the checksum placeholder in srcpkgs/freetube/template first."
-                echo "Computed checksum for v0.26.0-beta.tar.gz:"
-                curl -sL https://github.com/FreeTubeApp/FreeTube/archive/v0.26.0-beta.tar.gz | sha256sum
-                exit 1
-              fi
+
+              xbps-install -Suy xbps
+              xbps-install -Sy curl git
+              git clone --depth 1 https://github.com/void-linux/void-packages /void-packages
+
+              # Normally xbps-src passes SOURCE_DATE_EPOCH into the chroot; with
+              # IN_CHROOT set we have to provide it ourselves.
+              export SOURCE_DATE_EPOCH=$(git -C /void-packages log -1 --format=%ct)
+
+              cp -r /host/srcpkgs/freetube /void-packages/srcpkgs/
+
+              cd /void-packages
               ./xbps-src -j"$(nproc)" pkg freetube
             '
 
@@ -57,5 +57,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: freetube-x86_64-musl
-          path: hostdir/binpkgs/**/freetube-*.xbps
+          path: |
+            binpkgs/freetube-*.xbps
+            binpkgs/**/freetube-*.xbps
           if-no-files-found: error
